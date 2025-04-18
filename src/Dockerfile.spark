@@ -1,10 +1,29 @@
 FROM bitnami/spark:latest
 
-COPY requirements.txt .
-
 USER root
 
-RUN apt-get clean  && \
-	apt-get update && \
-	apt-get install -y python3-pip && \
-	pip3 install -r ./requirements.txt
+# 1. Install system dependencies needed for Python 3.9
+RUN apt-get update && apt-get install -y \
+    wget build-essential libssl-dev zlib1g-dev \
+    libncurses5-dev libncursesw5-dev libreadline-dev \
+    libsqlite3-dev libgdbm-dev libdb5.3-dev libbz2-dev \
+    libexpat1-dev liblzma-dev tk-dev libffi-dev uuid-dev curl
+
+# 2. Install Python 3.9 from source
+RUN wget https://www.python.org/ftp/python/3.9.18/Python-3.9.18.tgz && \
+    tar xvf Python-3.9.18.tgz && cd Python-3.9.18 && \
+    ./configure --enable-optimizations && \
+    make -j$(nproc) && make altinstall
+
+# 3. (Optional but good for consistency)
+RUN ln -sf /usr/local/bin/python3.9 /usr/bin/python && \
+    ln -sf /usr/local/bin/pip3.9 /usr/bin/pip
+
+# 4. Copy your dependencies
+COPY requirements.txt .
+
+# 5. Use Python 3.9 explicitly to install packages
+RUN /usr/local/bin/python3.9 --version && \
+    /usr/local/bin/pip3.9 --version && \
+    /usr/local/bin/pip3.9 install --upgrade pip && \
+    /usr/local/bin/pip3.9 install -r requirements.txt

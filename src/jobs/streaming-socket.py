@@ -8,7 +8,7 @@ def handle_date(obj):
         return obj.strftime('%Y-%m-%d %H:%M:%S')
     raise TypeError("Object of type '%s' is not JSON serializable" % type(obj).__name__)
 
-def send_data_over_socket(file_path, host='spark-master', port=9999, chunk_size=2):
+def send_data_over_socket(file_path, host='0.0.0.0', port=9999, chunk_size=2):
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.bind((host, port))
     s.listen(1)
@@ -44,4 +44,4 @@ def send_data_over_socket(file_path, host='spark-master', port=9999, chunk_size=
             print("Connection closed")
 
 if __name__ == "__main__":
-    send_data_over_socket("datasets/yelp_academic_dataset_review.json")
+    send_data_over_socket("datasets/reviews.jsonl")

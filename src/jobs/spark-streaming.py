@@ -1,85 +1,95 @@
 from time import sleep
-
-import pyspark
-import openai
+from openai import OpenAI
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import from_json, col, when, udf
-from pyspark.sql.types import StructType, StructField, StringType, FloatType
+from pyspark.sql.functions import from_json, col, when, udf, lit
+from pyspark.sql.types import StructType, StructField, StringType
 from config.config import config
 
-def sentiment_analysis(comment) -> str:
+# Load API key once
+openai_api_key = config['openai']['api_key']
+
+# Define UDF-compatible function
+def sentiment_analysis(comment: str) -> str:
     if comment:
-        openai.api_key = config['openai']['api_key']
-        completion = openai.ChatCompletion.create(
-            model='gpt-3.5-turbo',
-            messages = [
-                {
-                    "role": "system",
-                    "content": """
+        try:
+            # Client inside the function to avoid serialization issues
+            client = OpenAI(api_key=openai_api_key)
+            response = client.chat.completions.create(
+                model='gpt-3.5-turbo',
+                messages=[
+                    {
+                        "role": "system",
+                        "content": f"""
                         You're a machine learning model with a task of classifying comments into POSITIVE, NEGATIVE, NEUTRAL.
                         You are to respond with one word from the option specified above, do not add anything else.
-                        Here is the comment:
-                        
-                        {comment}
-                    """.format(comment=comment)
-                }
-            ]
-        )
-        return completion.choices[0].message['content']
+                        Here is the comment: {comment}
+                        """
+                    }
+                ]
+            )
+            return response.choices[0].message.content.strip()
+        except Exception as e:
+            print(f"OpenAI API error: {e}")
+            return "ERROR"
     return "Empty"
 
 def start_streaming(spark):
-    topic = 'customers_review'
+    topic = 'customer_reviews'
+
     while True:
         try:
-            stream_df = (spark.readStream.format("socket")
-                         .option("host", "0.0.0.0")
-                         .option("port", 9999)
-                         .load()
-                         )
+            # Step 1: Read from socket
+            stream_df = (
+                spark.readStream
+                    .format("socket")
+                    .option("host", "host.docker.internal")
+                    .option("port", 9999)
+                    .load()
+            )
 
+            # Step 2: Define minimal schema for the incoming JSON
             schema = StructType([
-                StructField("review_id", StringType()),
-                StructField("user_id", StringType()),
-                StructField("business_id", StringType()),
-                StructField("stars", FloatType()),
-                StructField("date", StringType()),
                 StructField("text", StringType())
             ])
 
-            stream_df = stream_df.select(from_json(col('value'), schema).alias("data")).select(("data.*"))
+            # Step 3: Parse the JSON line into a DataFrame
+            parsed_df = stream_df.select(from_json(col("value"), schema).alias("data")).select("data.*")
 
-            sentiment_analysis_udf = udf(sentiment_analysis, StringType())
+            # Step 4: Register UDF
+            sentiment_udf = udf(sentiment_analysis, StringType())
 
-            stream_df = stream_df.withColumn('feedback',
-                                             when(col('text').isNotNull(), sentiment_analysis_udf(col('text')))
-                                             .otherwise(None)
-                                             )
+            # Step 5: Apply sentiment classification
+            enriched_df = parsed_df.withColumn(
+                "feedback",
+                when(col("text").isNotNull(), sentiment_udf(col("text"))).otherwise(None)
+            )
 
-            kafka_df = stream_df.selectExpr("CAST(review_id AS STRING) AS key", "to_json(struct(*)) AS value")
+            # Step 6: Convert to Kafka-compatible format (optional key, can be dummy)
+            kafka_df = enriched_df.withColumn("key", lit("review")).selectExpr(
+                "CAST(key AS STRING)", "to_json(struct(*)) AS value"
+            )
 
-            query = (kafka_df.writeStream
-                   .format("kafka")
-                   .option("kafka.bootstrap.servers", config['kafka']['bootstrap.servers'])
-                   .option("kafka.security.protocol", config['kafka']['security.protocol'])
-                   .option('kafka.sasl.mechanism', config['kafka']['sasl.mechanisms'])
-                   .option('kafka.sasl.jaas.config',
-                           'org.apache.kafka.common.security.plain.PlainLoginModule required username="{username}" '
-                           'password="{password}";'.format(
-                               username=config['kafka']['sasl.username'],
-                               password=config['kafka']['sasl.password']
-                           ))
-                   .option('checkpointLocation', '/tmp/checkpoint')
-                   .option('topic', topic)
-                   .start()
-                   .awaitTermination()
-                )
+            # Step 7: Write to Kafka
+            query = (
+                kafka_df.writeStream
+                    .format("kafka")
+                    .option("kafka.bootstrap.servers", config['kafka']['bootstrap.servers'])
+                    .option("kafka.security.protocol", config['kafka']['security.protocol'])
+                    .option("kafka.sasl.mechanism", config['kafka']['sasl.mechanisms'])
+                    .option("kafka.sasl.jaas.config",
+                            f'org.apache.kafka.common.security.plain.PlainLoginModule required '
+                            f'username="{config["kafka"]["sasl.username"]}" '
+                            f'password="{config["kafka"]["sasl.password"]}";')
+                    .option("checkpointLocation", "/tmp/checkpoint")
+                    .option("topic", topic)
+                    .start()
+                    .awaitTermination()
+            )
 
         except Exception as e:
-            print(f'Exception encountered: {e}. Retrying in 10 seconds')
+            print(f"Exception encountered: {e}. Retrying in 10 seconds...")
             sleep(10)
 
 if __name__ == "__main__":
-    spark_conn = SparkSession.builder.appName("SocketStreamConsumer").getOrCreate()
-
-    start_streaming(spark_conn)
+    spark = SparkSession.builder.appName("SocketStreamConsumer").getOrCreate()
+    start_streaming(spark)
