@@ -91,5 +91,10 @@ def start_streaming(spark):
             sleep(10)
 
 if __name__ == "__main__":
-    spark = SparkSession.builder.appName("SocketStreamConsumer").getOrCreate()
+    #spark = SparkSession.builder.appName("SocketStreamConsumer").getOrCreate()
+    spark = SparkSession.builder \
+    .appName("SocketStreamConsumer") \
+    .config("spark.jars.packages", "org.apache.spark:spark-sql-kafka-0-10_2.12:3.2.4") \
+    .getOrCreate()
+
     start_streaming(spark)
